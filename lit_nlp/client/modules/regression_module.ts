@@ -32,11 +32,6 @@ interface RegressionResult {
   [key: string]: number;
 }
 
-interface ResultElement {
-  'header': string;
-  'result': string;
-}
-
 /**
  * A LIT module that renders regression results.
  */
@@ -56,7 +51,7 @@ export class RegressionModule extends LitModule {
 
   private readonly regressionService = app.getService(RegressionService);
 
-  @observable private results: RegressionResult[] = [];
+  @observable private result: RegressionResult|null = null;
 
   firstUpdated() {
     const getPrimarySelectedInputData = () =>
@@ -67,60 +62,56 @@ export class RegressionModule extends LitModule {
         });
   }
 
-  private async updateSelection(primarySelectedInputData: IndexedInput|null) {
-    this.results = [];
-    if (primarySelectedInputData == null) {
+  private async updateSelection(inputData: IndexedInput|null) {
+    if (inputData == null) {
+      this.result = null;
       return;
     }
 
-    const selectedInputData = [primarySelectedInputData];
-
     const dataset = this.appState.currentDataset;
     const promise = this.regressionService.getRegressionPreds(
-        selectedInputData, this.model, dataset);
+        [inputData], this.model, dataset);
 
     const results = await this.loadLatest('regressionPreds', promise);
-    if (results === null) return;
-
-    if (results.length > 0) {
-      const keys = Object.keys(results[0]);
-      for (let i = 0; i < selectedInputData.length; i++) {
-        for (const key of keys) {
-          const regressionInfo = (await this.regressionService.getResults(
-              [selectedInputData[i].id], this.model, key))[0];
-          results[i][this.regressionService.getErrorKey(key)] =
-              regressionInfo.error;
-        }
-      }
+    if (results === null || results.length === 0) {
+      this.result = null;
+      return;
     }
-    this.results = results;
+
+    // Extract the single result, as this only is for a single input.
+    const keys = Object.keys(results[0]);
+    for (const key of keys) {
+      const regressionInfo = (await this.regressionService.getResults(
+          [inputData.id], this.model, key))[0];
+      results[0][this.regressionService.getErrorKey(key)] =
+          regressionInfo.error;
+    }
+    this.result = results[0];
   }
 
   render() {
-    const primarySelectedInputData =
-        this.selectionService.primarySelectedInputData;
-    if (primarySelectedInputData == null) {
+    if (this.result == null) {
       return null;
     }
-    // We only show the primary selection, so input is always one example.
-    const input = primarySelectedInputData;
+    const result = this.result!;
+    const input = this.selectionService.primarySelectedInputData!;
 
     // Use the spec to find which fields we should display.
     const spec = this.appState.getModelSpec(this.model);
     const scoreFields: string[] = findSpecKeys(spec.output, 'RegressionScore');
 
 
-    const rows: ResultElement[][] = [];
-    // Display parent field, score and error on the same row per output.
+    const rows: string[][] = [];
+    // Per output, display score, and parent field and error if available.
     for (const scoreField of scoreFields) {
       // Add new row for each output from the model.
-      const row = [] as ResultElement[];
-      const score =
-          (this.results.length === 0 || this.results[0][scoreField] == null) ?
+      const row = [] as string[];
+      const score = result[scoreField] == null ?
           '' :
-          this.results[0][scoreField].toFixed(4);
+          result[scoreField].toFixed(4);
+      row.push(scoreField);
       if (score) {
-        row.push({'header': scoreField, 'result': score} as ResultElement);
+        row.push(score);
       }
       // Target score to compare against.
       const parentField = spec.output[scoreField].parent! || '';
@@ -128,34 +119,27 @@ export class RegressionModule extends LitModule {
           '' :
           input.data[parentField].toFixed(4);
       if (parentField && parentScore) {
-        row.push(
-            {'header': parentField, 'result': parentScore} as ResultElement);
-      }
-      const errorScore =
-          (this.results.length === 0 ||
-           this.results[0][this.regressionService.getErrorKey(scoreField)] ==
-               null) ?
-          '' :
-          this.results[0][this.regressionService.getErrorKey(scoreField)]
-              .toFixed(4);
-      if (errorScore) {
-        row.push({'header': 'error', 'result': errorScore} as ResultElement);
+        row.push(parentScore);
+        const errorScore =
+            result[this.regressionService.getErrorKey(scoreField)];
+        if (errorScore != null) {
+          row.push(errorScore.toFixed(4));
+        }
       }
       rows.push(row);
     }
 
-    const renderRow = (row: ResultElement[]) => html`
-      <tr>
-        ${row.map((entry) => html`<th>${entry.header}</th>`)}
-      </tr>
-      <tr>
-        ${row.map((entry) => html`<td>${entry.result}</td>`)}
-      </tr>`;
+    const columnNames = ["Field", "Score", "Ground truth", "Error"];
+    const columnVisibility = new Map<string, boolean>();
+    columnNames.forEach((name) => {
+      columnVisibility.set(name, true);
+    });
 
     return html`
-        <table>
-          ${rows.map((row) => renderRow(row))}
-        </table>`;
+      <lit-data-table
+        .columnVisibility=${columnVisibility}
+        .data=${rows} selectionDisabled
+      ></lit-data-table>`;
   }
 
   static shouldDisplayModule(modelSpecs: ModelInfoMap, datasetSpec: Spec) {
